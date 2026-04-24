@@ -26,5 +26,5 @@ Applies a +2/-10 point integer system with a boolean-driven pause state. This me
 
 1. Download .NET SDK: https://dotnet.microsoft.com/en-us/download
 2. git clone https://github.com/q1lra/reaction-trainer
-3. cd path/to/reaction-trainer-master
+3. cd path/to/reaction-trainer
 4. dotnet run
