@@ -2,13 +2,6 @@
 
 <img width="986" height="793" alt="image" src="https://github.com/user-attachments/assets/e62e6924-45eb-4382-8d44-9cf1e7e43af7" />
 
-## Installation
-
-1. Download .NET SDK: https://dotnet.microsoft.com/en-us/download
-2. git clone https://github.com/q1lra/reaction-trainer
-3. cd path/to/reaction-trainer-master
-4. dotnet run
-
 ## Features
 
 Technical Specifications
@@ -29,3 +22,10 @@ Operates on a 10ms timer-driven loop utilizing OptimizedDoubleBuffer to mitigate
 
 State Logic & Scoring
 Applies a +2/-10 point integer system with a boolean-driven pause state. This mechanism suspends all logic and timing calculations during menu interactions to prevent session time-leakage.
+
+## Installation
+
+1. Download .NET SDK: https://dotnet.microsoft.com/en-us/download
+2. git clone https://github.com/q1lra/reaction-trainer
+3. cd path/to/reaction-trainer-master
+4. dotnet run
