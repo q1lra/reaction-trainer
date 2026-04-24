@@ -4,8 +4,7 @@
 
 ## Features
 
-Technical Specifications  
-Dynamic Scaling & Resource Management
+Dynamic Scaling & Resource Management  
 Implements an object-pooling logic where additional target instances instantiate every 20 successful hits. Reaching the 3-miss threshold triggers a list-clearing function that resets the environment to a single base object.
 
 AES-256 Data Persistence  
