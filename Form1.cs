@@ -5,8 +5,8 @@ using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
-using System.Linq;
 
 namespace ReactionTrainer;
 
@@ -14,169 +14,324 @@ public partial class Form1 : Form
 {
     private Stopwatch _stopwatch = new Stopwatch();
     private Random _random = new Random();
-    private Button _target = null!;
-    private Panel _bgPanel = null!; 
-    private Label _statsLabel = null!, _highScoreLabel = null!, _pointsLabel = null!, _streakLabel = null!;
-    
-    private System.Windows.Forms.Timer _animationTimer = null!;
+    private System.Windows.Forms.Timer _gameLoop = null!;
 
-    private float _velocityX = 1.2f, _velocityY = 1.0f;
-    private float _targetVelocityX = 1.2f, _targetVelocityY = 1.0f;
-    private float _acceleration = 0.04f; 
-    
-    private int _points = 0, _streak = 0;
+    // FPS Tracking
+    private int _fps = 0;
+    private int _frameCount = 0;
+    private Stopwatch _fpsStopwatch = new Stopwatch();
+
+    private class Target {
+        public PointF Pos;
+        public float VX, VY, TVX, TVY;
+        public float Radius = 20; 
+    }
+    private List<Target> _targets = new();
+
+    private int _points = 0, _roundHits = 0, _roundMisses = 0;
+    private int _highestHits = 0; 
+    private int _streak = 0, _bestStreak = 0;
+    private int _missCount = 0; 
     private long _bestScore = long.MaxValue;
+    private string _savePath;
+    
+    private bool _showMarks = true;
 
-    private string _saveDir, _saveFile, _pointsFile;
+    private static readonly byte[] Key = Encoding.UTF8.GetBytes("R3act!onTr4in3r_S3cur1ty_K3y_256"); 
+    private static readonly byte[] IV = Encoding.UTF8.GetBytes("1234567890123456"); 
 
     private enum MarkerType { HitX, BulletHole }
-    private class WallMarker { public Point Location; public MarkerType Type; public float Rotation; }
+    private class WallMarker { public Point Location; public MarkerType Type; }
     private List<WallMarker> _wallMarkers = new();
+    
+    private class FloatingText { public string Text = ""; public PointF Location; public Color Color; public float Opacity = 1.0f; }
+    private List<FloatingText> _floatingTexts = new();
+    
+    private Label _fpsLabel = null!, _highScoreLabel = null!, _pointsLabel = null!, _hitsLabel = null!, _missesLabel = null!;
+    private bool _isPaused = false;
+    private Panel _menuPanel = null!, _settingsPanel = null!, _creditsPanel = null!;
 
     public Form1()
     {
-        _saveDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReactionTrainer");
-        if (!Directory.Exists(_saveDir)) Directory.CreateDirectory(_saveDir);
-        _saveFile = Path.Combine(_saveDir, "user.dat");
-        _pointsFile = Path.Combine(_saveDir, "points.dat");
+        this.SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        this.DoubleBuffered = true;
+        this.KeyPreview = true;
+        this.StartPosition = FormStartPosition.CenterScreen;
 
-        LoadHighScore();
-        LoadPoints();
+        string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReactionTrainer");
+        if (!Directory.Exists(appData)) Directory.CreateDirectory(appData);
+        _savePath = Path.Combine(appData, "game.dat");
+
+        LoadGameData();
         SetupGame();
+        SetupMenu();
     }
 
     private void SetupGame()
     {
         this.Text = "Reaction Trainer";
         this.Size = new Size(1000, 800);
-        this.BackColor = Color.FromArgb(20, 20, 20);
-        this.DoubleBuffered = true;
+        this.BackColor = Color.FromArgb(15, 15, 15);
         this.FormBorderStyle = FormBorderStyle.FixedSingle;
         this.MaximizeBox = false;
 
-        _bgPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
-        _bgPanel.MouseDown += (s, e) => { HandleMiss(e.Location); };
-        _bgPanel.Paint += (s, e) => { DrawWallMarkers(e.Graphics); };
-        this.Controls.Add(_bgPanel);
+        Panel header = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = Color.FromArgb(25, 25, 25) };
+        this.Controls.Add(header);
 
-        Color themeGrey = Color.FromArgb(140, 140, 140);
-        _statsLabel = CreateLabel(45, 20, themeGrey, "GO");
-        _highScoreLabel = CreateLabel(30, 10, themeGrey, _bestScore == long.MaxValue ? "BEST: --" : $"BEST: {_bestScore}ms");
-        _pointsLabel = CreateLabel(30, 10, themeGrey, $"POINTS: {_points}");
-        _streakLabel = CreateLabel(30, 10, themeGrey, $"STREAK: {_streak}");
+        _fpsLabel = CreateHeaderLabel("FPS: 0", Color.Gray, new Font("Consolas", 11, FontStyle.Bold));
+        _highScoreLabel = CreateHeaderLabel(GetBestString(), Color.Gray, new Font("Consolas", 11, FontStyle.Bold)); 
+        _pointsLabel = CreateHeaderLabel($"POINTS: {_points}", Color.Gray, new Font("Consolas", 11, FontStyle.Bold));
+        _hitsLabel = CreateHeaderLabel($"HITS: {_roundHits}", Color.Gray, new Font("Consolas", 11, FontStyle.Bold));
+        _missesLabel = CreateHeaderLabel($"MISSES: {_roundMisses}", Color.Gray, new Font("Consolas", 11, FontStyle.Bold));
 
-        _target = new Button {
-            Size = new Size(48, 48),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.Transparent,
-            Cursor = Cursors.Cross,
-            TabStop = false 
-        };
-        _target.FlatAppearance.BorderSize = 0;
-        _target.FlatAppearance.CheckedBackColor = Color.Transparent;
-        _target.FlatAppearance.MouseDownBackColor = Color.Transparent;
-        _target.FlatAppearance.MouseOverBackColor = Color.Transparent;
-        
-        _target.Paint += (s, e) => {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var b = new SolidBrush(Color.FromArgb(180, 173, 216, 230));
-            e.Graphics.FillEllipse(b, 4, 4, 40, 40);
-            using var p = new Pen(Color.White, 1);
-            e.Graphics.DrawEllipse(p, 4, 4, 40, 40);
-        };
-        
-        _target.MouseDown += (s, e) => { ProcessHit(); };
+        header.Controls.AddRange(new Control[] { _missesLabel, _hitsLabel, _pointsLabel, _highScoreLabel, _fpsLabel });
 
-        _animationTimer = new System.Windows.Forms.Timer { Interval = 10 };
-        _animationTimer.Tick += AnimationTimer_Tick;
-        _animationTimer.Start();
+        this.MouseDown += HandleGlobalClick;
+        this.KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) ToggleMenu(); };
 
-        _bgPanel.Controls.Add(_streakLabel);
-        _bgPanel.Controls.Add(_pointsLabel);
-        _bgPanel.Controls.Add(_highScoreLabel);
-        _bgPanel.Controls.Add(_statsLabel);
-        _bgPanel.Controls.Add(_target);
-
-        _target.Location = new Point(476, 376);
+        AddNewTarget();
+        _gameLoop = new System.Windows.Forms.Timer { Interval = 10 };
+        _gameLoop.Tick += (s, e) => { if (!_isPaused) { UpdateGame(); this.Invalidate(); } };
+        _gameLoop.Start();
         _stopwatch.Start();
+        _fpsStopwatch.Start();
     }
 
-    private Label CreateLabel(int h, int f, Color c, string t) => new Label { Text = t, ForeColor = c, Dock = DockStyle.Top, Height = h, TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Consolas", f, FontStyle.Bold), AutoSize = false, BackColor = Color.Transparent };
-
-    private void HandleMiss(Point loc)
+    private void SetupMenu()
     {
-        _streak = 0;
-        _statsLabel.Text = "MISS";
-        _wallMarkers.Add(new WallMarker { Location = loc, Type = MarkerType.BulletHole, Rotation = _random.Next(360) });
-        UpdateStats();
-        _bgPanel.Invalidate();
-    }
+        Color solidBack = Color.FromArgb(30, 30, 30);
+        Size pSize = new Size(320, 380);
 
-    private void ProcessHit()
-    {
-        _stopwatch.Stop();
-        long res = _stopwatch.ElapsedMilliseconds;
-        _statsLabel.Text = $"{res}ms";
-        _points++; 
-        _streak++;
+        _menuPanel = CreateBasePanel(pSize, solidBack, "");
+        Panel mContent = (Panel)_menuPanel.Controls[0];
         
-        SavePoints(); 
-        UpdateStats();
-        _wallMarkers.Add(new WallMarker { Location = new Point(_target.Location.X + 24, _target.Location.Y + 24), Type = MarkerType.HitX });
+        mContent.Controls.Add(CreateMenuButton("LEADERBOARD", 45, (s, e) => MessageBox.Show("Coming Soon!", "")));
+        mContent.Controls.Add(CreateMenuButton("SETTINGS", 115, (s, e) => { _menuPanel.Visible = false; _settingsPanel.Visible = true; }));
+        mContent.Controls.Add(CreateMenuButton("RESET STATS", 185, (s, e) => ResetAllStats()));
+        mContent.Controls.Add(CreateMenuButton("CREDITS", 255, (s, e) => { _menuPanel.Visible = false; _creditsPanel.Visible = true; }));
         
-        if (res < _bestScore) { _bestScore = res; SaveHighScore(); }
-        _stopwatch.Restart(); 
-        MoveTarget();
-        _bgPanel.Invalidate();
-        this.ActiveControl = null; 
+        _settingsPanel = CreateBasePanel(pSize, solidBack, "SETTINGS");
+        Panel sContent = (Panel)_settingsPanel.Controls[0];
+        CheckBox chkMarks = new CheckBox { 
+            Text = "Show Marks", ForeColor = Color.White, 
+            Checked = _showMarks, FlatStyle = FlatStyle.Flat, 
+            Font = new Font("Consolas", 10, FontStyle.Bold), 
+            AutoSize = true, Location = new Point(25, 80) 
+        };
+        chkMarks.CheckedChanged += (s, e) => { _showMarks = chkMarks.Checked; SaveGameData(); };
+        sContent.Controls.Add(chkMarks);
+
+        _creditsPanel = CreateBasePanel(pSize, solidBack, "CREDITS");
+        Panel cContent = (Panel)_creditsPanel.Controls[0];
+        Label cDev = new Label { 
+            Text = "Developed by q1lra", ForeColor = Color.Gray, 
+            Font = new Font("Consolas", 10), AutoSize = true, 
+            Location = new Point(25, 80) 
+        };
+        cContent.Controls.Add(cDev);
+
+        this.Controls.AddRange(new Control[] { _menuPanel, _settingsPanel, _creditsPanel });
     }
 
-    private void DrawWallMarkers(Graphics g)
+    private void ResetAllStats()
     {
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        foreach (var marker in _wallMarkers) {
-            if (marker.Type == MarkerType.HitX) {
-                // SMALLER & MORE TRANSPARENT RED X
-                using var pen = new Pen(Color.FromArgb(70, 220, 0, 0), 1);
-                int s = 5; 
-                g.DrawLine(pen, marker.Location.X - s, marker.Location.Y - s, marker.Location.X + s, marker.Location.Y + s);
-                g.DrawLine(pen, marker.Location.X + s, marker.Location.Y - s, marker.Location.X - s, marker.Location.Y + s);
-            } 
-            else {
-                // SOLID BULLET HOLE
-                using var bCore = new SolidBrush(Color.Black);
-                using var bRim = new SolidBrush(Color.FromArgb(40, 40, 40));
-                g.FillEllipse(bRim, marker.Location.X - 3, marker.Location.Y - 3, 6, 6);
-                g.FillEllipse(bCore, marker.Location.X - 2, marker.Location.Y - 2, 4, 4);
+        if (MessageBox.Show("Reset everything?", "", MessageBoxButtons.YesNo) == DialogResult.Yes)
+        {
+            _points = 0; _streak = 0; _roundHits = 0; _roundMisses = 0; _highestHits = 0; _bestStreak = 0; _bestScore = long.MaxValue; _missCount = 0;
+            _wallMarkers.Clear();
+            _targets.Clear();
+            AddNewTarget();
+            UpdateStats();
+            SaveGameData();
+        }
+    }
+
+    private Panel CreateBasePanel(Size size, Color backColor, string title)
+    {
+        Panel border = new Panel { Size = size, BackColor = Color.FromArgb(100, 100, 100), Padding = new Padding(1), Visible = false, Location = new Point((1000 - size.Width) / 2, (800 - size.Height) / 2) };
+        Panel content = new Panel { Dock = DockStyle.Fill, BackColor = backColor };
+        border.Controls.Add(content);
+        if (!string.IsNullOrEmpty(title)) {
+            Label lbl = new Label { Text = title, ForeColor = Color.White, Font = new Font("Consolas", 13, FontStyle.Bold), Location = new Point(20, 20), AutoSize = true };
+            content.Controls.Add(lbl);
+        }
+        Label xBtn = new Label { Text = "✕", ForeColor = Color.White, Font = new Font("Arial", 12, FontStyle.Bold), Size = new Size(30, 30), Location = new Point(size.Width - 35, 5), TextAlign = ContentAlignment.MiddleCenter, Cursor = Cursors.Hand };
+        xBtn.Click += (s, e) => { if (string.IsNullOrEmpty(title)) ToggleMenu(); else { border.Visible = false; _menuPanel.Visible = true; } };
+        content.Controls.Add(xBtn);
+        return border;
+    }
+
+    private Button CreateMenuButton(string text, int y, EventHandler click)
+    {
+        var b = new Button { Text = text, Location = new Point(60, y), Size = new Size(200, 50), FlatStyle = FlatStyle.Flat, ForeColor = Color.White, BackColor = Color.FromArgb(40, 40, 40), Font = new Font("Consolas", 9, FontStyle.Bold) };
+        b.FlatAppearance.BorderSize = 1; b.FlatAppearance.BorderColor = Color.FromArgb(70, 70, 70);
+        b.Click += click; return b;
+    }
+
+    private void ToggleMenu()
+    {
+        _isPaused = !_isPaused;
+        _menuPanel.Visible = _isPaused;
+        _settingsPanel.Visible = _creditsPanel.Visible = false;
+        if (!_isPaused) _stopwatch.Start(); else _stopwatch.Stop();
+    }
+
+    // Simplified as requested: ONLY shows best reaction time
+    private string GetBestString() => $"BEST: {(_bestScore == long.MaxValue ? 0 : _bestScore)}ms";
+
+    private void AddNewTarget() => _targets.Add(new Target { Pos = new PointF(_random.Next(100, 800), _random.Next(150, 600)), VX = 2, VY = 2, TVX = 2, TVY = 2 });
+
+    private void HandleGlobalClick(object? sender, MouseEventArgs e)
+    {
+        if (e.Y < 50 || _isPaused) return;
+        Target? hit = null;
+        foreach (var t in _targets)
+            if (Math.Sqrt(Math.Pow(e.X - (t.Pos.X + t.Radius), 2) + Math.Pow(e.Y - (t.Pos.Y + t.Radius), 2)) <= t.Radius) { hit = t; break; }
+
+        if (hit != null) {
+            long res = _stopwatch.ElapsedMilliseconds;
+            if (res < 5) return;
+            
+            _roundHits++; _points += 2; // Hit rewards 2 points
+            _streak++;
+            
+            PointF GetRandomPos() => new PointF(e.X + _random.Next(-35, 35), e.Y + _random.Next(-50, 0));
+
+            if (res < _bestScore) {
+                _bestScore = res;
+                _floatingTexts.Add(new FloatingText { Text = "TOP SCORE", Location = GetRandomPos(), Color = Color.Yellow });
+            }
+
+            if (res < 140) {
+                _floatingTexts.Add(new FloatingText { Text = "NON-HUMAN", Location = GetRandomPos(), Color = Color.Yellow });
+            }
+            else if (res < 180) {
+                _floatingTexts.Add(new FloatingText { Text = "LUCKY", Location = GetRandomPos(), Color = Color.Yellow });
+            }
+            else if (res <= 250) {
+                _floatingTexts.Add(new FloatingText { Text = "HIGH SCORE", Location = GetRandomPos(), Color = Color.Yellow });
+            }
+
+            _floatingTexts.Add(new FloatingText { Text = $"{_streak}x", Location = new PointF(e.X + _random.Next(-10, 10), e.Y + _random.Next(-10, 10)), Color = Color.LimeGreen });
+
+            if (_roundHits > _highestHits) _highestHits = _roundHits;
+            
+            if (_roundHits > 0 && _roundHits % 20 == 0) AddNewTarget();
+
+            _wallMarkers.Add(new WallMarker { Location = e.Location, Type = MarkerType.HitX });
+            hit.Pos = new PointF(_random.Next(100, 800), _random.Next(150, 600));
+            _stopwatch.Restart();
+        } else {
+            _points -= 10; _missCount++; _roundMisses++; // Miss removes 10 points
+            _wallMarkers.Add(new WallMarker { Location = e.Location, Type = MarkerType.BulletHole });
+            
+            _floatingTexts.Add(new FloatingText { Text = $"miss ({_missCount}/3)", Location = new PointF(e.X + _random.Next(-20, 20), e.Y), Color = Color.Red });
+            _floatingTexts.Add(new FloatingText { Text = "-10", Location = new PointF(e.X + _random.Next(-20, 20), e.Y + 15), Color = Color.Red });
+
+            if (_missCount >= 3) {
+                _streak = 0;
+                _missCount = 0;
+                _roundHits = 0;
+                _roundMisses = 0;
+                if (_targets.Count > 1) _targets.RemoveRange(1, _targets.Count - 1);
             }
         }
+        UpdateStats(); SaveGameData();
     }
 
-    private void AnimationTimer_Tick(object? sender, EventArgs e)
+    private void UpdateGame()
     {
-        float max = Math.Min(1.8f + (_streak * 0.04f), 8f);
-        if (_random.Next(0, 60) == 0) {
-            _targetVelocityX = (float)((_random.NextDouble() * 2 - 1) * max);
-            _targetVelocityY = (float)((_random.NextDouble() * 2 - 1) * (max * 0.6f));
+        // FPS Calculation
+        _frameCount++;
+        if (_fpsStopwatch.ElapsedMilliseconds >= 1000)
+        {
+            _fps = _frameCount;
+            _frameCount = 0;
+            _fpsStopwatch.Restart();
+            _fpsLabel.Text = $"FPS: {_fps}";
         }
-        if (_velocityX < _targetVelocityX) _velocityX += _acceleration; else _velocityX -= _acceleration;
-        if (_velocityY < _targetVelocityY) _velocityY += _acceleration; else _velocityY -= _acceleration;
-        _target.Left += (int)_velocityX; _target.Top += (int)_velocityY;
 
-        if (_target.Left <= 0 || _target.Left >= ClientSize.Width - _target.Width) { _targetVelocityX *= -1; _velocityX *= -0.8f; }
-        if (_target.Top <= 180 || _target.Top >= ClientSize.Height - _target.Height) { _targetVelocityY *= -1; _velocityY *= -0.8f; }
+        for (int i = _floatingTexts.Count - 1; i >= 0; i--) {
+            _floatingTexts[i].Opacity -= 0.012f; _floatingTexts[i].Location.Y -= 0.4f;
+            if (_floatingTexts[i].Opacity <= 0) _floatingTexts.RemoveAt(i);
+        }
+
+        float speed = Math.Min(1.2f * (1.0f + (_roundHits * 0.015f)), 6.5f);
+        foreach (var t in _targets) {
+            if (_random.Next(0, 60) == 0) { t.TVX = (float)((_random.NextDouble() * 2 - 1) * speed); t.TVY = (float)((_random.NextDouble() * 2 - 1) * speed); }
+            t.VX += (t.TVX - t.VX) * 0.05f; t.VY += (t.TVY - t.VY) * 0.05f;
+            t.Pos.X += t.VX; t.Pos.Y += t.VY;
+            if (t.Pos.X <= 0) { t.VX = Math.Abs(t.VX); t.Pos.X = 0; }
+            if (t.Pos.X >= ClientSize.Width - (t.Radius * 2)) { t.VX = -Math.Abs(t.VX); t.Pos.X = ClientSize.Width - (t.Radius * 2); }
+            if (t.Pos.Y <= 50) { t.VY = Math.Abs(t.VY); t.Pos.Y = 50; }
+            if (t.Pos.Y >= ClientSize.Height - (t.Radius * 2)) { t.VY = -Math.Abs(t.VY); t.Pos.Y = ClientSize.Height - (t.Radius * 2); }
+        }
     }
 
-    private void MoveTarget() => _target.Location = new Point(_random.Next(50, Width - 100), _random.Next(200, Height - 150));
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Graphics g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        string hint = "PRESS [ESC] TO OPEN MENU";
+        using (Font hf = new Font("Consolas", 8, FontStyle.Bold)) {
+            SizeF sz = g.MeasureString(hint, hf);
+            g.DrawString(hint, hf, Brushes.DimGray, (this.ClientSize.Width - sz.Width) / 2, 60);
+        }
+        if (_showMarks) {
+            foreach (var m in _wallMarkers) {
+                if (m.Type == MarkerType.HitX) {
+                    using var p = new Pen(Color.FromArgb(80, 200, 0, 0), 1.5f);
+                    g.DrawLine(p, m.Location.X - 4, m.Location.Y - 4, m.Location.X + 4, m.Location.Y + 4);
+                    g.DrawLine(p, m.Location.X + 4, m.Location.Y - 4, m.Location.X - 4, m.Location.Y + 4);
+                } else {
+                    using var bR = new SolidBrush(Color.FromArgb(160, 45, 45, 45));
+                    using var bC = new SolidBrush(Color.FromArgb(200, 15, 15, 15));
+                    g.FillEllipse(bR, m.Location.X - 3.5f, m.Location.Y - 3.5f, 7, 7);
+                    g.FillEllipse(bC, m.Location.X - 1.5f, m.Location.Y - 1.5f, 3, 3);
+                }
+            }
+        }
+        foreach (var t in _targets) {
+            g.FillEllipse(Brushes.LightSteelBlue, t.Pos.X, t.Pos.Y, t.Radius * 2, t.Radius * 2);
+            g.DrawEllipse(Pens.White, t.Pos.X, t.Pos.Y, t.Radius * 2, t.Radius * 2);
+        }
+        foreach (var ft in _floatingTexts) {
+            using var b = new SolidBrush(Color.FromArgb((int)(ft.Opacity * 255), ft.Color));
+            g.DrawString(ft.Text, new Font("Consolas", 9, FontStyle.Bold), b, ft.Location);
+        }
+    }
 
+    private Label CreateHeaderLabel(string t, Color c, Font f) => new Label { Text = t, ForeColor = c, Font = f, Dock = DockStyle.Left, Width = 190, TextAlign = ContentAlignment.MiddleCenter };
     private void UpdateStats() { 
-        _streakLabel.Text = $"STREAK: {_streak}"; 
+        _hitsLabel.Text = $"HITS: {_roundHits}"; 
+        _missesLabel.Text = $"MISSES: {_roundMisses}"; 
         _pointsLabel.Text = $"POINTS: {_points}"; 
-        _highScoreLabel.Text = _bestScore == long.MaxValue ? "BEST: --" : $"BEST: {_bestScore}ms"; 
+        _highScoreLabel.Text = GetBestString(); 
     }
 
-    private void SaveHighScore() { try { File.WriteAllText(_saveFile, Convert.ToBase64String(Encoding.UTF8.GetBytes(_bestScore.ToString()))); } catch {} }
-    private void LoadHighScore() { try { if (File.Exists(_saveFile)) _bestScore = long.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(File.ReadAllText(_saveFile)))); } catch {} }
-    private void SavePoints() { try { File.WriteAllText(_pointsFile, Convert.ToBase64String(Encoding.UTF8.GetBytes(_points.ToString()))); } catch {} }
-    private void LoadPoints() { try { if (File.Exists(_pointsFile)) _points = int.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(File.ReadAllText(_pointsFile)))); } catch {} }
+    private void SaveGameData() {
+        try { File.WriteAllBytes(_savePath, EncryptString($"{_bestScore}|{_points}|{_highestHits}|{_bestStreak}|{_showMarks}")); } catch { }
+    }
+
+    private void LoadGameData() {
+        try {
+            if (!File.Exists(_savePath)) return;
+            string[] p = DecryptString(File.ReadAllBytes(_savePath)).Split('|');
+            _bestScore = long.Parse(p[0]); 
+            _points = int.Parse(p[1]); 
+            _highestHits = int.Parse(p[2]); 
+            _bestStreak = int.Parse(p[3]);
+            if (p.Length >= 5) _showMarks = bool.Parse(p[4]);
+        } catch { }
+    }
+
+    private byte[] EncryptString(string t) {
+        using Aes a = Aes.Create(); a.Key = Key; a.IV = IV;
+        return a.CreateEncryptor().TransformFinalBlock(Encoding.UTF8.GetBytes(t), 0, t.Length);
+    }
+
+    private string DecryptString(byte[] d) {
+        using Aes a = Aes.Create(); a.Key = Key; a.IV = IV;
+        return Encoding.UTF8.GetString(a.CreateDecryptor().TransformFinalBlock(d, 0, d.Length));
+    }
 }
